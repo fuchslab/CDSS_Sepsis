@@ -1,0 +1,757 @@
+####################################################
+### 2-Step Cross-sectional Classification Models ###
+####################################################
+
+# load required libraries
+import pandas as pd
+import numpy as np
+from sklearn import preprocessing
+from sklearn.utils import resample
+
+# import data
+# Import your data and preprocess it if necessary.
+
+
+
+
+###### Random Forest ######
+
+# load required packages
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import GridSearchCV, KFold
+from sklearn.metrics import precision_recall_fscore_support
+
+# parameter for grid search
+param_dict_rf = {
+    "criterion" : ["gini", "entropy"],
+    "max_depth": range(3,10),
+    "min_samples_split": range(5,30),
+    "n_estimators" : [10, 25, 50 , 100, 250],
+}
+
+# specify inner and outer loop
+inner_cv = KFold(n_splits = 5, shuffle = True, random_state = 379215)
+outer_cv = KFold(n_splits = 10, shuffle = True, random_state = 986471)
+
+# create empty list for results
+results_outer = []
+models_rf = []
+
+# outer loop
+for train_id, test_id in outer_cv.split(X1):
+    
+    # train-test-split
+    ## train data for step 1
+    X_train1 = X1.iloc[train_id]
+    y_train1 = y1.iloc[train_id]
+    y_train1 = np.array(y_train1)
+    ## test data for both steps
+    X_test = X1.iloc[test_id]
+    y_test = y_all.iloc[test_id]
+    ## true antibiotic for train data
+    y_train_true = y_all.iloc[train_id]
+    
+    # normalize data
+    scaler = preprocessing.StandardScaler()
+    X_train1 = scaler.fit_transform(X_train1)
+    X_test = scaler.transform(X_test)
+    
+    # classifier
+    rf = RandomForestClassifier(random_state = 723901)
+    
+    # grid search step 1
+    grid_rf1 = GridSearchCV(estimator = rf,
+                             param_grid = param_dict_rf,
+                             cv = inner_cv,
+                             scoring = 'f1',
+                             refit = True).fit(X_train1, y_train1.ravel())
+    
+    # get best model fit on whole training data for step 1
+    best_model1 = grid_rf1.best_estimator_
+    
+    # save model
+    models_rf.append(best_model1)
+    
+    # derive data for step 2
+    features_train = pd.DataFrame(X_train1)
+    data_train = features_train.join(y_train_true.reset_index())
+    ## filter data set by removing PipTaz
+    data_train2 = data_train[data_train["antibiotic"] != "Piperacillin/Tazobactam"].reset_index()
+
+    # check class imbalance
+    data_train2["antibiotic"].value_counts()
+
+    # encode target variable
+    le = preprocessing.LabelEncoder() # define encoder
+    le.fit(["others", "Cefotaxim", "Meropenem", "Ampicillin/Sulbactam", "Levofloxacin", "Ceftriaxon", "Cefuroxim", "Vancomycin", "Ciprofloxacin", "Piperacillin/Tazobactam-Levofloxacin"]) # fit encoder
+    data_train2["antibiotic"] = le.transform(data_train2["antibiotic"]) # transform target vaiable
+    le_name_mapping = dict(zip(le.classes_, le.transform(le.classes_)))
+    
+    # get mean of classes
+    mean = data_train2["antibiotic"].value_counts().mean()
+    mean = int(mean)
+    
+    # define which values need to be up-/downsamled
+    counts = data_train2['antibiotic'].value_counts().reset_index()
+    above = []
+    below = []
+    for element in counts["count"]:
+        if element >= mean:
+            above.append(counts.loc[counts["count"] == element, "antibiotic"])
+        else:
+            below.append(counts.loc[counts["count"] == element, "antibiotic"])
+    
+    above = set(pd.concat(above).tolist())
+    below = set(pd.concat(below).tolist())
+            
+    # get data sets with samples to be up- or downsampled
+    majority = data_train2[data_train2["antibiotic"].isin(above)]
+    minority = data_train2[data_train2["antibiotic"].isin(below)]
+    
+    # downsampling
+    majority_down = []
+    for antibiotic_nr in above:
+        majority_down.append(resample(majority[majority["antibiotic"] == antibiotic_nr],
+                                 replace = False,
+                                 n_samples = mean,
+                                 random_state = 343))
+    
+    majority_down = pd.concat(majority_down)
+    
+    # upsampling
+    minority_up = []
+    for antibiotic_nr in below:
+        count = sum(minority["antibiotic"] == antibiotic_nr)
+        diff = mean - count
+        minority_up.append(resample(minority[minority["antibiotic"] == antibiotic_nr],
+                                    replace = True,
+                                    n_samples = diff,
+                                    random_state = 6428))
+    
+    minority_up = pd.concat(minority_up)
+    minority_up = pd.concat([minority_up, minority])
+                                            
+    # combine rebalanced data sets
+    data_rebalanced = pd.concat([minority_up, majority_down])
+    data_rebalanced["antibiotic"].value_counts()
+    
+    # split train data into features and target
+    X_train2 = data_rebalanced.drop(["level_0", "index", "antibiotic"], axis = 1) # features
+    y_train2 = data_rebalanced[target_cols2] # labels
+    y_train2 = np.array(y_train2)
+    
+    # classifier
+    rf = RandomForestClassifier(random_state = 723901)
+    
+    # grid search
+    grid_rf2 = GridSearchCV(estimator = rf,
+                             param_grid = param_dict_rf,
+                             cv = inner_cv,
+                             scoring = 'f1_macro',
+                             refit = True).fit(X_train2, y_train2.ravel())
+    
+    # get best model fit on whole training data
+    best_model2 = grid_rf2.best_estimator_
+    
+    # save model
+    models_rf.append(best_model2)
+        
+    # evaluate model on whole test set
+    pred1 = pd.DataFrame(best_model1.predict(X_test))
+    pred2 = pd.DataFrame(best_model2.predict(X_test))
+    pred_all = pd.concat([pred1, pred2], axis=1)
+    pred_all.columns = ['prediction_step1', 'prediction_step2']
+    
+    # encode columns
+    pred_all["prediction_step1"] = pred_all["prediction_step1"].replace({1: "Piperacillin/Tazobactam", 0: "no Piperacillin/Tazobactam"})
+    pred_all["prediction_step2"] = le.inverse_transform(pred_all["prediction_step2"])
+    
+    # create new column combining the prediction results
+    pred_all["prediction_all"] = np.where((pred_all["prediction_step1"] == "Piperacillin/Tazobactam"), pred_all["prediction_step1"], pred_all["prediction_step2"])
+    
+    # get array of final predictions
+    pred = np.array(pred_all["prediction_all"])
+    
+    # convert truth to array
+    truth_test = np.array(y_test)
+    
+    # evaluate the model
+    results_all = []
+    for antibiotic in ["Piperacillin/Tazobactam", "others", "Cefotaxim", "Meropenem", "Ampicillin/Sulbactam", "Levofloxacin", "Ceftriaxon", "Cefuroxim", "Vancomycin", "Ciprofloxacin", "Piperacillin/Tazobactam-Levofloxacin"]:
+        prec,recall,f1,_ = precision_recall_fscore_support(np.array(truth_test) == antibiotic,
+                                                           np.array(pred) == antibiotic,
+                                                           pos_label=True,
+                                                           average=None)
+        recall = np.where(recall == [1.], [0., 1.], recall)
+        prec = np.where(prec == [1.], [0., 1.], prec)
+        f1 = np.where(f1 == [1.], [0., 1.], f1)
+        results_all.append([antibiotic, recall[1], recall[0], prec[1], f1[1]])
+    metrics = pd.DataFrame(results_all, columns = ["class", "sensitivity", "specificity", "precision", "f1"])
+        
+    # store result
+    results_outer.append(metrics)
+    
+# average the estimated performance of the model across all loops
+for i in range(len(results_outer)):
+    globals()[f"df_{i}"] = results_outer[i]
+    
+results_outer_avg_rf = (pd.concat([df_0, df_1, df_2, df_3, df_4, df_5, df_6, df_7, df_8, df_9])).groupby("class", as_index = False).agg({"sensitivity": "mean", "specificity": "mean", "precision": "mean", "f1": "mean"})
+      
+    
+
+
+
+
+###### Gradient Boosting Classifier ######
+
+# load required packages
+from sklearn.ensemble import GradientBoostingClassifier
+
+# parameter for grid search
+param_dict_gbc = {
+    "learning_rate": [0.001, 0.01, 0.1],
+    "max_depth": range(3,10),
+    "min_samples_split": range(5,30),
+    "n_estimators" : [10, 25, 50 , 100, 250],
+}
+
+# specify inner and outer loop
+inner_cv = KFold(n_splits = 5, shuffle = True, random_state = 379215)
+outer_cv = KFold(n_splits = 10, shuffle = True, random_state = 986471)
+
+# create empty list for results
+results_outer = []
+models_gbc = []
+
+# outer loop
+for train_id, test_id in outer_cv.split(X1):
+    
+    # train-test-split
+    ## train data for step 1
+    X_train1 = X1.iloc[train_id]
+    y_train1 = y1.iloc[train_id]
+    y_train1 = np.array(y_train1)
+    ## test data for both steps
+    X_test = X1.iloc[test_id]
+    y_test = y_all.iloc[test_id]
+    ## true antibiotic for train data
+    y_train_true = y_all.iloc[train_id]
+    
+    # normalize data
+    scaler = preprocessing.StandardScaler()
+    X_train1 = scaler.fit_transform(X_train1)
+    X_test = scaler.transform(X_test)
+    
+    # classifier
+    gbc = GradientBoostingClassifier(random_state = 101734)
+    
+    # grid search step 1
+    grid_gbc1 = GridSearchCV(estimator = gbc,
+                             param_grid = param_dict_gbc,
+                             cv = inner_cv,
+                             scoring = 'f1',
+                             refit = True).fit(X_train1, y_train1.ravel())
+    
+    # get best model fit on whole training data for step 1
+    best_model1 = grid_gbc1.best_estimator_
+    
+    # save model
+    models_gbc.append(best_model1)
+    
+    # derive data for step 2
+    features_train = pd.DataFrame(X_train1)
+    data_train = features_train.join(y_train_true.reset_index())
+    ## filter data set by removing PipTaz
+    data_train2 = data_train[data_train["antibiotic"] != "Piperacillin/Tazobactam"].reset_index()
+
+    # check class imbalance
+    data_train2["antibiotic"].value_counts()
+
+    # encode target variable
+    le = preprocessing.LabelEncoder() # define encoder
+    le.fit(["others", "Cefotaxim", "Meropenem", "Ampicillin/Sulbactam", "Levofloxacin", "Ceftriaxon", "Cefuroxim", "Vancomycin", "Ciprofloxacin", "Piperacillin/Tazobactam-Levofloxacin"]) # fit encoder
+    data_train2["antibiotic"] = le.transform(data_train2["antibiotic"]) # transform target vaiable
+    le_name_mapping = dict(zip(le.classes_, le.transform(le.classes_)))
+    
+    # get mean of classes
+    mean = data_train2["antibiotic"].value_counts().mean()
+    mean = int(mean)
+    
+    # define which values need to be up-/downsamled
+    counts = data_train2['antibiotic'].value_counts().reset_index()
+    above = []
+    below = []
+    for element in counts["count"]:
+        if element >= mean:
+            above.append(counts.loc[counts["count"] == element, "antibiotic"])
+        else:
+            below.append(counts.loc[counts["count"] == element, "antibiotic"])
+    
+    above = set(pd.concat(above).tolist())
+    below = set(pd.concat(below).tolist())
+            
+    # get data sets with samples to be up- or downsampled
+    majority = data_train2[data_train2["antibiotic"].isin(above)]
+    minority = data_train2[data_train2["antibiotic"].isin(below)]
+    
+    # downsampling
+    majority_down = []
+    for antibiotic_nr in above:
+        majority_down.append(resample(majority[majority["antibiotic"] == antibiotic_nr],
+                                 replace = False,
+                                 n_samples = mean,
+                                 random_state = 343))
+    
+    majority_down = pd.concat(majority_down)
+    
+    # upsampling
+    minority_up = []
+    for antibiotic_nr in below:
+        count = sum(minority["antibiotic"] == antibiotic_nr)
+        diff = mean - count
+        minority_up.append(resample(minority[minority["antibiotic"] == antibiotic_nr],
+                                    replace = True,
+                                    n_samples = diff,
+                                    random_state = 6428))
+    
+    minority_up = pd.concat(minority_up)
+    minority_up = pd.concat([minority_up, minority])
+                                            
+    # combine rebalanced data sets
+    data_rebalanced = pd.concat([minority_up, majority_down])
+    data_rebalanced["antibiotic"].value_counts()
+    
+    # split train data into features and target
+    X_train2 = data_rebalanced.drop(["level_0", "index", "antibiotic"], axis = 1) # features
+    y_train2 = data_rebalanced[target_cols2] # labels
+    y_train2 = np.array(y_train2)
+    
+    # classifier
+    gbc = GradientBoostingClassifier(random_state = 101734)
+    
+    # grid search
+    grid_gbc2 = GridSearchCV(estimator = gbc,
+                             param_grid = param_dict_gbc,
+                             cv = inner_cv,
+                             scoring = 'f1_macro',
+                             refit = True).fit(X_train2, y_train2.ravel())
+    
+    # get best model fit on whole training data
+    best_model2 = grid_gbc2.best_estimator_
+    
+    # save model
+    models_gbc.append(best_model2)
+        
+    # evaluate model on whole test set
+    pred1 = pd.DataFrame(best_model1.predict(X_test))
+    pred2 = pd.DataFrame(best_model2.predict(X_test))
+    pred_all = pd.concat([pred1, pred2], axis=1)
+    pred_all.columns = ['prediction_step1', 'prediction_step2']
+    
+    # encode columns
+    pred_all["prediction_step1"] = pred_all["prediction_step1"].replace({1: "Piperacillin/Tazobactam", 0: "no Piperacillin/Tazobactam"})
+    pred_all["prediction_step2"] = le.inverse_transform(pred_all["prediction_step2"])
+    
+    # create new column combining the prediction results
+    pred_all["prediction_all"] = np.where((pred_all["prediction_step1"] == "Piperacillin/Tazobactam"), pred_all["prediction_step1"], pred_all["prediction_step2"])
+    
+    # get array of final predictions
+    pred = np.array(pred_all["prediction_all"])
+    
+    # convert truth to array
+    truth_test = np.array(y_test)
+    
+    # evaluate the model
+    results_all = []
+    for antibiotic in ["Piperacillin/Tazobactam", "others", "Cefotaxim", "Meropenem", "Ampicillin/Sulbactam", "Levofloxacin", "Ceftriaxon", "Cefuroxim", "Vancomycin", "Ciprofloxacin", "Piperacillin/Tazobactam-Levofloxacin"]:
+        prec,recall,f1,_ = precision_recall_fscore_support(np.array(truth_test) == antibiotic,
+                                                           np.array(pred) == antibiotic,
+                                                           pos_label=True,
+                                                           average=None)
+        recall = np.where(recall == [1.], [0., 1.], recall)
+        prec = np.where(prec == [1.], [0., 1.], prec)
+        f1 = np.where(f1 == [1.], [0., 1.], f1)
+        results_all.append([antibiotic, recall[1], recall[0], prec[1], f1[1]])
+    metrics = pd.DataFrame(results_all, columns = ["class", "sensitivity", "specificity", "precision", "f1"])
+        
+    # store result
+    results_outer.append(metrics)
+    
+# average the estimated performance of the model across all loops
+for i in range(len(results_outer)):
+    globals()[f"df_{i}"] = results_outer[i]
+    
+results_outer_avg_gbc = (pd.concat([df_0, df_1, df_2, df_3, df_4, df_5, df_6, df_7, df_8, df_9])).groupby("class", as_index = False).agg({"sensitivity": "mean", "specificity": "mean", "precision": "mean", "f1": "mean"})
+
+
+
+
+
+
+###### Support Vector Classifier ######
+
+# load required packages
+from sklearn.svm import SVC
+
+# parameter for grid search
+param_dict_svc = {
+    "C" : [0.5, 1, 2.5, 5],
+    "kernel": ["poly", "rbf", "sigmoid"],
+    "degree": range(2, 6)
+}
+
+# specify inner and outer loop
+inner_cv = KFold(n_splits = 5, shuffle = True, random_state = 379215)
+outer_cv = KFold(n_splits = 10, shuffle = True, random_state = 986471)
+
+# create empty list for results
+results_outer = []
+models_svc = []
+
+# outer loop
+for train_id, test_id in outer_cv.split(X1):
+    
+    # train-test-split
+    ## train data for step 1
+    X_train1 = X1.iloc[train_id]
+    y_train1 = y1.iloc[train_id]
+    y_train1 = np.array(y_train1)
+    ## test data for both steps
+    X_test = X1.iloc[test_id]
+    y_test = y_all.iloc[test_id]
+    ## true antibiotic for train data
+    y_train_true = y_all.iloc[train_id]
+    
+    # normalize data
+    scaler = preprocessing.StandardScaler()
+    X_train1 = scaler.fit_transform(X_train1)
+    X_test = scaler.transform(X_test)
+    
+    # classifier
+    svc = SVC(random_state = 58760, max_iter = 100000)
+    
+    # grid search step 1
+    grid_svc1 = GridSearchCV(estimator = svc,
+                             param_grid = param_dict_svc,
+                             cv = inner_cv,
+                             scoring = 'f1',
+                             refit = True).fit(X_train1, y_train1.ravel())
+    
+    # get best model fit on whole training data for step 1
+    best_model1 = grid_svc1.best_estimator_
+    
+    # save model
+    models_svc.append(best_model1)
+    
+    # derive data for step 2
+    features_train = pd.DataFrame(X_train1)
+    data_train = features_train.join(y_train_true.reset_index())
+    ## filter data set by removing PipTaz
+    data_train2 = data_train[data_train["antibiotic"] != "Piperacillin/Tazobactam"].reset_index()
+
+    # check class imbalance
+    data_train2["antibiotic"].value_counts()
+
+    # encode target variable
+    le = preprocessing.LabelEncoder() # define encoder
+    le.fit(["others", "Cefotaxim", "Meropenem", "Ampicillin/Sulbactam", "Levofloxacin", "Ceftriaxon", "Cefuroxim", "Vancomycin", "Ciprofloxacin", "Piperacillin/Tazobactam-Levofloxacin"]) # fit encoder
+    data_train2["antibiotic"] = le.transform(data_train2["antibiotic"]) # transform target vaiable
+    le_name_mapping = dict(zip(le.classes_, le.transform(le.classes_)))
+    
+    # get mean of classes
+    mean = data_train2["antibiotic"].value_counts().mean()
+    mean = int(mean)
+    
+    # define which values need to be up-/downsamled
+    counts = data_train2['antibiotic'].value_counts().reset_index()
+    above = []
+    below = []
+    for element in counts["count"]:
+        if element >= mean:
+            above.append(counts.loc[counts["count"] == element, "antibiotic"])
+        else:
+            below.append(counts.loc[counts["count"] == element, "antibiotic"])
+    
+    above = set(pd.concat(above).tolist())
+    below = set(pd.concat(below).tolist())
+            
+    # get data sets with samples to be up- or downsampled
+    majority = data_train2[data_train2["antibiotic"].isin(above)]
+    minority = data_train2[data_train2["antibiotic"].isin(below)]
+    
+    # downsampling
+    majority_down = []
+    for antibiotic_nr in above:
+        majority_down.append(resample(majority[majority["antibiotic"] == antibiotic_nr],
+                                 replace = False,
+                                 n_samples = mean,
+                                 random_state = 343))
+    
+    majority_down = pd.concat(majority_down)
+    
+    # upsampling
+    minority_up = []
+    for antibiotic_nr in below:
+        count = sum(minority["antibiotic"] == antibiotic_nr)
+        diff = mean - count
+        minority_up.append(resample(minority[minority["antibiotic"] == antibiotic_nr],
+                                    replace = True,
+                                    n_samples = diff,
+                                    random_state = 6428))
+    
+    minority_up = pd.concat(minority_up)
+    minority_up = pd.concat([minority_up, minority])
+                                            
+    # combine rebalanced data sets
+    data_rebalanced = pd.concat([minority_up, majority_down])
+    data_rebalanced["antibiotic"].value_counts()
+    
+    # split train data into features and target
+    X_train2 = data_rebalanced.drop(["level_0", "index", "antibiotic"], axis = 1) # features
+    y_train2 = data_rebalanced[target_cols2] # labels
+    y_train2 = np.array(y_train2)
+    
+    # classifier
+    svc = SVC(random_state = 58760, max_iter = 100000)
+    
+    # grid search
+    grid_svc2 = GridSearchCV(estimator = svc,
+                             param_grid = param_dict_svc,
+                             cv = inner_cv,
+                             scoring = 'f1_macro',
+                             refit = True).fit(X_train2, y_train2.ravel())
+    
+    # get best model fit on whole training data
+    best_model2 = grid_svc2.best_estimator_
+    
+    # save model
+    models_svc.append(best_model2)
+        
+    # evaluate model on whole test set
+    pred1 = pd.DataFrame(best_model1.predict(X_test))
+    pred2 = pd.DataFrame(best_model2.predict(X_test))
+    pred_all = pd.concat([pred1, pred2], axis=1)
+    pred_all.columns = ['prediction_step1', 'prediction_step2']
+    
+    # encode columns
+    pred_all["prediction_step1"] = pred_all["prediction_step1"].replace({1: "Piperacillin/Tazobactam", 0: "no Piperacillin/Tazobactam"})
+    pred_all["prediction_step2"] = le.inverse_transform(pred_all["prediction_step2"])
+    
+    # create new column combining the prediction results
+    pred_all["prediction_all"] = np.where((pred_all["prediction_step1"] == "Piperacillin/Tazobactam"), pred_all["prediction_step1"], pred_all["prediction_step2"])
+    
+    # get array of final predictions
+    pred = np.array(pred_all["prediction_all"])
+    
+    # convert truth to array
+    truth_test = np.array(y_test)
+    
+    # evaluate the model
+    results_all = []
+    for antibiotic in ["Piperacillin/Tazobactam", "others", "Cefotaxim", "Meropenem", "Ampicillin/Sulbactam", "Levofloxacin", "Ceftriaxon", "Cefuroxim", "Vancomycin", "Ciprofloxacin", "Piperacillin/Tazobactam-Levofloxacin"]:
+        prec,recall,f1,_ = precision_recall_fscore_support(np.array(truth_test) == antibiotic,
+                                                           np.array(pred) == antibiotic,
+                                                           pos_label=True,
+                                                           average=None)
+        recall = np.where(recall == [1.], [0., 1.], recall)
+        prec = np.where(prec == [1.], [0., 1.], prec)
+        f1 = np.where(f1 == [1.], [0., 1.], f1)
+        results_all.append([antibiotic, recall[1], recall[0], prec[1], f1[1]])
+    metrics = pd.DataFrame(results_all, columns = ["class", "sensitivity", "specificity", "precision", "f1"])
+        
+    # store result
+    results_outer.append(metrics)
+    
+# average the estimated performance of the model across all loops
+for i in range(len(results_outer)):
+    globals()[f"df_{i}"] = results_outer[i]
+    
+results_outer_avg_svc = (pd.concat([df_0, df_1, df_2, df_3, df_4, df_5, df_6, df_7, df_8, df_9])).groupby("class", as_index = False).agg({"sensitivity": "mean", "specificity": "mean", "precision": "mean", "f1": "mean"})
+
+
+
+
+
+
+###### Multilayer Perceptron ######
+
+# load required packages
+from sklearn.neural_network import MLPClassifier
+
+# parameter for grid search
+param_dict_mlp = {
+    "hidden_layer_sizes": [(100,), (100, 100), (100, 100, 100), (100, 100, 100, 100), (100, 100, 100, 100, 100)],
+    "solver": ["sgd", "lbfgs", "sgd", "adam"],
+    "activation": ["relu", "logistic", "tanh"],
+    "alpha": [0.0001, 0.0005, 0.001],
+    "learning_rate_init" : [0.0001, 0.001, 0.01, 0.1]
+}
+
+# specify inner and outer loop
+inner_cv = KFold(n_splits = 5, shuffle = True, random_state = 379215)
+outer_cv = KFold(n_splits = 10, shuffle = True, random_state = 986471)
+
+# create empty list for results
+results_outer = []
+models_mlp = []
+
+# outer loop
+for train_id, test_id in outer_cv.split(X1):
+    
+    # train-test-split
+    ## train data for step 1
+    X_train1 = X1.iloc[train_id]
+    y_train1 = y1.iloc[train_id]
+    y_train1 = np.array(y_train1)
+    ## test data for both steps
+    X_test = X1.iloc[test_id]
+    y_test = y_all.iloc[test_id]
+    ## true antibiotic for train data
+    y_train_true = y_all.iloc[train_id]
+    
+    # normalize data
+    scaler = preprocessing.StandardScaler()
+    X_train1 = scaler.fit_transform(X_train1)
+    X_test = scaler.transform(X_test)
+    
+    # classifier
+    mlp = MLPClassifier(random_state = 196, max_iter = 1000000)
+    
+    # grid search step 1
+    grid_mlp1 = GridSearchCV(estimator = mlp,
+                             param_grid = param_dict_mlp,
+                             cv = inner_cv,
+                             scoring = 'f1',
+                             refit = True).fit(X_train1, y_train1.ravel())
+    
+    # get best model fit on whole training data for step 1
+    best_model1 = grid_mlp1.best_estimator_
+    
+    # save model
+    models_mlp.append(best_model1)
+    
+    # derive data for step 2
+    features_train = pd.DataFrame(X_train1)
+    data_train = features_train.join(y_train_true.reset_index())
+    ## filter data set by removing PipTaz
+    data_train2 = data_train[data_train["antibiotic"] != "Piperacillin/Tazobactam"].reset_index()
+
+    # check class imbalance
+    data_train2["antibiotic"].value_counts()
+
+    # encode target variable
+    le = preprocessing.LabelEncoder() # define encoder
+    le.fit(["others", "Cefotaxim", "Meropenem", "Ampicillin/Sulbactam", "Levofloxacin", "Ceftriaxon", "Cefuroxim", "Vancomycin", "Ciprofloxacin", "Piperacillin/Tazobactam-Levofloxacin"]) # fit encoder
+    data_train2["antibiotic"] = le.transform(data_train2["antibiotic"]) # transform target vaiable
+    le_name_mapping = dict(zip(le.classes_, le.transform(le.classes_)))
+    
+    # get mean of classes
+    mean = data_train2["antibiotic"].value_counts().mean()
+    mean = int(mean)
+    
+    # define which values need to be up-/downsamled
+    counts = data_train2['antibiotic'].value_counts().reset_index()
+    above = []
+    below = []
+    for element in counts["count"]:
+        if element >= mean:
+            above.append(counts.loc[counts["count"] == element, "antibiotic"])
+        else:
+            below.append(counts.loc[counts["count"] == element, "antibiotic"])
+    
+    above = set(pd.concat(above).tolist())
+    below = set(pd.concat(below).tolist())
+            
+    # get data sets with samples to be up- or downsampled
+    majority = data_train2[data_train2["antibiotic"].isin(above)]
+    minority = data_train2[data_train2["antibiotic"].isin(below)]
+    
+    # downsampling
+    majority_down = []
+    for antibiotic_nr in above:
+        majority_down.append(resample(majority[majority["antibiotic"] == antibiotic_nr],
+                                 replace = False,
+                                 n_samples = mean,
+                                 random_state = 343))
+    
+    majority_down = pd.concat(majority_down)
+    
+    # upsampling
+    minority_up = []
+    for antibiotic_nr in below:
+        count = sum(minority["antibiotic"] == antibiotic_nr)
+        diff = mean - count
+        minority_up.append(resample(minority[minority["antibiotic"] == antibiotic_nr],
+                                    replace = True,
+                                    n_samples = diff,
+                                    random_state = 6428))
+    
+    minority_up = pd.concat(minority_up)
+    minority_up = pd.concat([minority_up, minority])
+                                            
+    # combine rebalanced data sets
+    data_rebalanced = pd.concat([minority_up, majority_down])
+    data_rebalanced["antibiotic"].value_counts()
+    
+    # split train data into features and target
+    X_train2 = data_rebalanced.drop(["level_0", "index", "antibiotic"], axis = 1) # features
+    y_train2 = data_rebalanced[target_cols2] # labels
+    y_train2 = np.array(y_train2)
+    
+    # classifier
+    mlp = MLPClassifier(random_state = 196, max_iter = 1000000)
+    
+    # grid search
+    grid_mlp2 = GridSearchCV(estimator = mlp,
+                             param_grid = param_dict_mlp,
+                             cv = inner_cv,
+                             scoring = 'f1_macro',
+                             refit = True).fit(X_train2, y_train2.ravel())
+    
+    # get best model fit on whole training data
+    best_model2 = grid_mlp2.best_estimator_
+    
+    # save model
+    models_mlp.append(best_model2)
+        
+    # evaluate model on whole test set
+    pred1 = pd.DataFrame(best_model1.predict(X_test))
+    pred2 = pd.DataFrame(best_model2.predict(X_test))
+    pred_all = pd.concat([pred1, pred2], axis=1)
+    pred_all.columns = ['prediction_step1', 'prediction_step2']
+    
+    # encode columns
+    pred_all["prediction_step1"] = pred_all["prediction_step1"].replace({1: "Piperacillin/Tazobactam", 0: "no Piperacillin/Tazobactam"})
+    pred_all["prediction_step2"] = le.inverse_transform(pred_all["prediction_step2"])
+    
+    # create new column combining the prediction results
+    pred_all["prediction_all"] = np.where((pred_all["prediction_step1"] == "Piperacillin/Tazobactam"), pred_all["prediction_step1"], pred_all["prediction_step2"])
+    
+    # get array of final predictions
+    pred = np.array(pred_all["prediction_all"])
+    
+    # convert truth to array
+    truth_test = np.array(y_test)
+    
+    # evaluate the model
+    results_all = []
+    for antibiotic in ["Piperacillin/Tazobactam", "others", "Cefotaxim", "Meropenem", "Ampicillin/Sulbactam", "Levofloxacin", "Ceftriaxon", "Cefuroxim", "Vancomycin", "Ciprofloxacin", "Piperacillin/Tazobactam-Levofloxacin"]:
+        prec,recall,f1,_ = precision_recall_fscore_support(np.array(truth_test) == antibiotic,
+                                                           np.array(pred) == antibiotic,
+                                                           pos_label=True,
+                                                           average=None)
+        recall = np.where(recall == [1.], [0., 1.], recall)
+        prec = np.where(prec == [1.], [0., 1.], prec)
+        f1 = np.where(f1 == [1.], [0., 1.], f1)
+        results_all.append([antibiotic, recall[1], recall[0], prec[1], f1[1]])
+    metrics = pd.DataFrame(results_all, columns = ["class", "sensitivity", "specificity", "precision", "f1"])
+        
+    # store result
+    results_outer.append(metrics)
+    
+# average the estimated performance of the model across all loops
+for i in range(len(results_outer)):
+    globals()[f"df_{i}"] = results_outer[i]
+    
+results_outer_avg_mlp = (pd.concat([df_0, df_1, df_2, df_3, df_4, df_5, df_6, df_7, df_8, df_9])).groupby("class", as_index = False).agg({"sensitivity": "mean", "specificity": "mean", "precision": "mean", "f1": "mean"})
+
