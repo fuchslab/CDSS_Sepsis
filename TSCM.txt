@@ -1,0 +1,317 @@
+################################################
+### 2-Step Time Series Classification Models ###
+################################################
+
+# load required libraries
+import pandas as pd
+import numpy as np
+from sklearn import preprocessing
+from dtaidistance import dtw_ndim
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.model_selection import GridSearchCV, KFold
+from sklearn.metrics import precision_recall_fscore_support
+from sklearn.utils import resample
+
+
+# import data
+# Import your data and preprocess it if necessary.
+
+
+
+###### TCSM ######
+
+param_dict = {
+    'n_neighbors':[3, 5, 15, 25, 55]
+}
+
+# specify inner and outer loop
+inner_cv = KFold(n_splits = 5, shuffle = True, random_state = 379215)
+outer_cv = KFold(n_splits = 10, shuffle = True, random_state = 986471)
+
+# define features and target
+input_vars = ["infection_id", "age", "heart_rate", "mIbp", "body_temp", "fio2", "pO2", "leucocytes", "thrombocytes", "crp", "creatinine", "lactate", "blood_sugar", "bilirubin", "dialysis_binary", "ventilation_binary", "sex_male", "sex_female", "focus1_Entzündung Prothese", "focus1_Galle", "focus1_Gehirn", "focus1_Haut, Muskel", "focus1_Knochen, Gelenke, Sehnen, Bandscheiben", "focus1_Lunge", "focus1_Magen, Darm", "focus1_Urogenitaltrakt", "focus1_others"]
+target_var = ["infection_id", "antibiotic"]
+
+# create empty list for results
+results_outer = []
+models_dtw_knn = []
+
+# outer loop
+for train_id, test_id in outer_cv.split(data):
+    
+    # train-test-split
+    train = data.iloc[train_id]
+    test = data.iloc[test_id]
+    
+    # derive infection_id of training and test set
+    infection_id_train = train["infection_id"]
+    infection_id_test = test["infection_id"]
+
+    # filter time series data and target data according to infection_id
+    data_train = data_filled[data_filled["infection_id"].isin(infection_id_train)]
+    data_test = data_filled[data_filled["infection_id"].isin(infection_id_test)]
+    target_train = first_ab[first_ab["infection_id"].isin(infection_id_train)]
+    target_test = first_ab[first_ab["infection_id"].isin(infection_id_test)]
+
+    # train and test sets
+    X_train = data_train[input_vars].reset_index(drop = True)
+    y_train = target_train[target_var].reset_index(drop = True)
+    X_test = data_test[input_vars].reset_index(drop = True)
+    y_test = target_test[target_var].reset_index(drop = True)
+    
+    # save column containing infection_id
+    infection_id_train = X_train["infection_id"].reset_index(drop = True)
+    infection_id_test = X_test["infection_id"]
+    
+    # remove column infection_id from X_train and X_test
+    X_train = X_train.drop('infection_id', axis=1)
+    X_test = X_test.drop('infection_id', axis=1)
+    
+    # normalize data
+    scaler = preprocessing.StandardScaler()
+    X_train = pd.DataFrame(scaler.fit_transform(X_train))
+    X_test = pd.DataFrame(scaler.transform(X_test))
+    
+    # merge infection_id
+    X_train = X_train.join(infection_id_train)
+    X_test = X_test.join(infection_id_test)
+    
+    # convert antibiotics from string to integer
+    unique_list = y_train['antibiotic'].unique()
+    transformation_dict = dict(zip(unique_list, range(1, len(unique_list)+1)))
+    y_train['antibiotic'] = y_train['antibiotic'].apply(lambda x: transformation_dict[x])
+    y_train = y_train.reset_index(drop=True)
+    y_test['antibiotic'] = y_test['antibiotic'].apply(lambda x: transformation_dict[x])
+    y_test = y_test.reset_index(drop=True)
+    
+
+    ### STEP 1 ###
+    # create target variable for step 1
+    y_train["PipTaz"] = np.where((y_train["antibiotic"] == 1), 1, 0)
+    y_test["PipTaz"] = np.where((y_test["antibiotic"] == 1), 1, 0)
+    
+    # preprocess data for dtw calculation
+    X = pd.concat([X_train, X_test], axis = 0)
+    list_of_arrays = [group.iloc[:, 0:26].to_numpy()
+                     for _, group in X.groupby("infection_id")
+                     ]
+
+    # calculate dtw distance
+    dtw_distances = dtw_ndim.distance_matrix(list_of_arrays)
+    dtw_distances_train1 = dtw_distances[:y_train.shape[0], :y_train.shape[0]]
+    dtw_distances_test1 = dtw_distances[y_train.shape[0]:, :y_train.shape[0]]
+
+    # classifier
+    knn = KNeighborsClassifier(metric = "precomputed")
+    
+    # grid search
+    grid_knn = GridSearchCV(estimator = knn,
+                             param_grid = param_dict,
+                             cv = inner_cv,
+                             scoring = 'f1_macro',
+                             refit = True).fit(dtw_distances_train1, y_train["PipTaz"])
+    
+    # get best model fit on whole training data
+    best_model1 = grid_knn.best_estimator_
+    
+    # save model
+    models_dtw_knn.append(best_model1)
+    
+    
+    
+    ### STEP 2 ###
+    # train and test sets
+    X_train = data_train[input_vars].reset_index(drop = True)
+    y_train = target_train[target_var].reset_index(drop = True)
+    X_test = data_test[input_vars].reset_index(drop = True)
+    y_test = target_test[target_var].reset_index(drop = True)
+    
+    # save column containing infection_id
+    infection_id_train = X_train["infection_id"].reset_index(drop = True)
+    infection_id_test = X_test["infection_id"]
+    
+    # remove column infection_id from X_train and X_test
+    X_train = X_train.drop('infection_id', axis=1)
+    X_test = X_test.drop('infection_id', axis=1)
+    
+    # normalize data
+    scaler = preprocessing.StandardScaler()
+    X_train = pd.DataFrame(scaler.fit_transform(X_train))
+    X_test = pd.DataFrame(scaler.transform(X_test))
+    
+    # merge infection_id
+    X_train = X_train.join(infection_id_train)
+    X_test = X_test.join(infection_id_test)
+    
+    # convert antibiotics from string to integer
+    unique_list = y_train['antibiotic'].unique()
+    transformation_dict = dict(zip(unique_list, range(1, len(unique_list)+1)))
+    y_train['antibiotic'] = y_train['antibiotic'].apply(lambda x: transformation_dict[x])
+    y_train = y_train.reset_index(drop=True)
+    y_test['antibiotic'] = y_test['antibiotic'].apply(lambda x: transformation_dict[x])
+    y_test = y_test.reset_index(drop=True)
+
+    # make copy of y_train
+    y_train2 = y_train
+    
+    # remove PipTaz from y_train
+    y_train2 = y_train[y_train["antibiotic"] != 1].reset_index(drop = True)
+    
+    # combine X_train and y_train and drop nan
+    train2 = pd.merge(X_train, y_train2, on = ["infection_id"], how = "left")
+    train2 = train2.dropna()
+    
+    # check class imbalance
+    y_train2["antibiotic"].value_counts()
+        
+    # get mean of classes
+    mean = y_train2["antibiotic"].value_counts().mean()
+    mean = int(mean)
+    
+    # define which values need to be up-/downsampled
+    counts = y_train2['antibiotic'].value_counts().reset_index()
+    above = []
+    below = []
+    for element in counts["count"]:
+        if element >= mean:
+            above.append(counts.loc[counts["count"] == element, "antibiotic"]) #counts[counts == element].label)
+        else:
+            below.append(counts.loc[counts["count"] == element, "antibiotic"])
+    
+    above = set(pd.concat(above).tolist())
+    below = set(pd.concat(below).tolist())
+                
+    # get data sets with samples to be up- or downsampled
+    majority = train2[train2["antibiotic"].isin(above)]
+    minority = train2[train2["antibiotic"].isin(below)]
+    
+    # derive first row per patient
+    minority_first = minority.groupby("infection_id")[[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, "infection_id", "antibiotic"]].apply(lambda minority: minority.iloc[0, :])
+    majority_first = majority.groupby("infection_id")[[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, "infection_id", "antibiotic"]].apply(lambda majority: majority.iloc[0, :])
+    
+    
+    # downsampling
+    majority_down = []
+    for antibiotic_nr in above:
+        majority_down.append(resample(majority_first[majority_first["antibiotic"] == antibiotic_nr],
+                                 replace = False,
+                                 n_samples = mean,
+                                 random_state = 343))
+    
+    majority_down = pd.concat(majority_down).reset_index(drop = True)
+    
+    # add column of ones
+    majority_down["select"] = 1
+    majority_down = majority_down.drop([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25], axis=1)
+    
+    # add remaining intervals to downsampled dataset
+    majority_select = pd.merge(majority, majority_down, on = ["infection_id", "antibiotic"], how = "left")
+    majority_select = majority_select.dropna()
+    
+    # upsampling
+    minority_up = []
+    for antibiotic_nr in below:
+        count = sum(minority_first["antibiotic"] == antibiotic_nr)
+        diff = mean - count
+        minority_up.append(resample(minority_first[minority_first["antibiotic"] == antibiotic_nr],
+                                    replace = True,
+                                    n_samples = diff,
+                                    random_state = 6428))
+    
+    minority_up = pd.concat(minority_up, ignore_index = True)
+    
+    # get column with count of IDs
+    minority_up["count"] = minority_up.groupby("infection_id")["infection_id"].transform("count")
+    minority_up["count"] = minority_up["count"] + 1 # number of repetitions
+    minority_up = minority_up.iloc[:, 26:29].drop_duplicates()
+    
+    data_up_list = []
+    for index, row in minority_up.iterrows():
+        ID = row['infection_id']
+        count_per_id = row['count']
+    
+        data_ID = minority[minority['infection_id'] == ID]
+        data_upsampled_ID = pd.concat([data_ID] * count_per_id, ignore_index = True)
+        
+        # add string to IDs for duplicated rows
+        number_of_duplicates = np.repeat(np.array(range(0, count_per_id)), 5)
+        data_upsampled_ID['infection_id'] = data_upsampled_ID['infection_id'].astype(str) + '_dup_' + pd.Series(number_of_duplicates).astype(str)
+        
+        # add to list
+        data_up_list.append(data_upsampled_ID)
+
+    # combine upsampled data with original dataframe
+    data_orig = minority[~minority['infection_id'].isin(minority_up['infection_id'])]
+    data_up = pd.concat(data_up_list)
+    minority_up_all = pd.concat([data_orig, data_up]).reset_index(drop=True)
+    
+    # combine rebalanced data sets
+    data_rebalanced = pd.concat([minority_up_all, majority_select]).reset_index()
+    
+    # split into features and target
+    X_train = data_rebalanced.drop("index", axis=1)
+    y_train = data_rebalanced.drop(["index", 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25], axis=1).drop_duplicates()
+    
+    # preprocess data for dtw calculation
+    X = pd.concat([X_train, X_test], axis = 0)
+    list_of_arrays = [group.iloc[:, 0:26].to_numpy()
+                     for _, group in X.groupby("infection_id")
+                     ]
+    
+    # calculate dtw distance
+    dtw_distances = dtw_ndim.distance_matrix(list_of_arrays)
+    dtw_distances_train2 = dtw_distances[:y_train.shape[0], :y_train.shape[0]]
+    dtw_distances_test2 = dtw_distances[y_train.shape[0]:, :y_train.shape[0]]
+    
+    # classifier
+    knn = KNeighborsClassifier(metric = "precomputed")
+
+    # grid search
+    grid_knn = GridSearchCV(estimator = knn,
+                             param_grid = param_dict,
+                             cv = inner_cv,
+                             scoring = 'f1_macro',
+                             refit = True).fit(dtw_distances_train2, y_train["antibiotic"])
+    
+    # get best model fit on whole training data
+    best_model2 = grid_knn.best_estimator_
+    
+    # save model
+    models_dtw_knn.append(best_model2)
+    
+    # evaluate model on whole test set
+    pred1 = pd.DataFrame(best_model1.predict(dtw_distances_test1))
+    pred2 = pd.DataFrame(best_model2.predict(dtw_distances_test2))
+    pred_all = pd.concat([pred1, pred2], axis=1)
+    pred_all.columns = ['prediction_step1', 'prediction_step2']
+    
+    # create new column combining the prediction results
+    pred_all["prediction_all"] = np.where((pred_all["prediction_step1"] == 1), pred_all["prediction_step1"], pred_all["prediction_step2"])
+    
+    # get array of final predictions
+    pred = np.array(pred_all["prediction_all"])
+    
+    # convert truth to array
+    truth_test = np.array(y_test["antibiotic"])
+    
+    results_all = []
+    for antibiotic in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]:
+        prec,recall,f1,_ = precision_recall_fscore_support(np.array(truth_test) == antibiotic,
+                                                           np.array(pred) == antibiotic,
+                                                           pos_label=True,
+                                                           average=None)
+        recall = np.where(recall == [1.], [0., 1.], recall)
+        prec = np.where(prec == [1.], [0., 1.], prec)
+        f1 = np.where(f1 == [1.], [0., 1.], f1)
+        results_all.append([antibiotic, recall[1], recall[0], prec[1], f1[1]])
+    metrics_results = pd.DataFrame(results_all, columns = ["class", "sensitivity", "specificity", "precision", "f1"])
+    
+    # store result
+    results_outer.append(metrics_results)
+    
+# average the estimated performance of the model across all loops
+for i in range(len(results_outer)):
+    globals()[f"df_{i}"] = results_outer[i]
+    
+results_outer_avg = (pd.concat([df_0, df_1, df_2, df_3, df_4, df_5, df_6, df_7, df_8, df_9])).groupby("class", as_index = False).agg({"sensitivity": "mean", "specificity": "mean", "precision": "mean", "f1": "mean"})
+print(transformation_dict)
